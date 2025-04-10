@@ -29,10 +29,22 @@ import { MongoCollection } from "./types.js";
  */
 let client: MongoClient | null = null;
 let db: any = null;
+let currentDatabaseName: string | null = null;
 /**
  * Flag indicating whether the connection is in read-only mode
  */
 let isReadOnlyMode = false;
+
+/**
+ * Switch to a different database
+ */
+async function switchDatabase(databaseName: string) {
+  if (!client) {
+    throw new Error("MongoDB connection is not available");
+  }
+  db = client.db(databaseName);
+  currentDatabaseName = databaseName;
+}
 
 /**
  * Create an MCP server with capabilities for resources (to list/read collections),
@@ -57,12 +69,15 @@ const server = new Server(
  */
 async function connectToMongoDB(url: string, readOnly: boolean = false) {
   try {
+    const parsedUrl = new URL(url);
+    const databaseName = parsedUrl.pathname.substring(1) || 'admin';
     const options = readOnly
       ? { readPreference: ReadPreference.SECONDARY }
       : {};
     client = new MongoClient(url, options);
     await client.connect();
-    db = client.db();
+    db = client.db(databaseName);
+    currentDatabaseName = databaseName;
     isReadOnlyMode = readOnly;
     return true;
   } catch (error) {
@@ -448,6 +463,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Optional: Filter to apply to the collections",
             },
           },
+        },
+      },
+      {
+        name: "switchDatabase",
+        description: "Switch to a different database in the MongoDB server",
+        inputSchema: {
+          type: "object",
+          properties: {
+            database: {
+              type: "string",
+              description: "Name of the database to switch to",
+            },
+          },
+          required: ["database"],
         },
       },
     ],
@@ -1030,30 +1059,64 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "listCollections": {
       const { nameOnly, filter } = request.params.arguments || {};
-
       try {
-        // Get the list of collections
-        const options = filter ? { filter } : {};
-        const collections = await db.listCollections(options).toArray();
-
-        // If nameOnly is true, return only the collection names
-        const result = nameOnly
-          ? collections.map((collection: any) => collection.name)
-          : collections;
-
+        const collections = await db.listCollections(filter).toArray();
+        if (nameOnly) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  collections.map((c: any) => c.name),
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(collections, null, 2),
             },
           ],
         };
       } catch (error) {
         if (error instanceof Error) {
-          throw new Error(`Failed to list collections: ${error.message}`);
+          throw new Error(
+            `Failed to list collections: ${error.message}`,
+          );
         }
         throw new Error("Failed to list collections: Unknown error");
+      }
+    }
+
+    case "switchDatabase": {
+      const { database } = request.params.arguments || {};
+      if (!database || typeof database !== 'string') {
+        throw new Error("Database name must be a non-empty string");
+      }
+      try {
+        await switchDatabase(database);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                { message: `Successfully switched to database: ${database}` },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        if (error instanceof Error) {
+          throw new Error(`Failed to switch database: ${error.message}`);
+        }
+        throw new Error("Failed to switch database: Unknown error");
       }
     }
 
